@@ -1,0 +1,27 @@
+build*/
+cmake-build*/
+
+*.exe
+*.dll
+*.so
+*.a
+*.o
+
+# Runtime crypto artifacts
+artifacts/**/*.pem
+artifacts/**/*.der
+artifacts/**/*.key
+artifacts/**/*.sig
+artifacts/**/*.bin
+artifacts/**/*.csv
+artifacts/**/*.log
+artifacts/**/*.txt
+
+# Keep folders
+!artifacts/**/
+!artifacts/**/benchmark/
+!artifacts/**/screenshots/
+
+.DS_Store
+.vscode/
+.idea/
