@@ -93,20 +93,9 @@ EvpPkeyPtr generate_rsa_pss_key() {
     ensure_ok(EVP_PKEY_keygen_init(ctx.get()), "RSA keygen init failed");
     ensure_ok(EVP_PKEY_CTX_set_rsa_keygen_bits(ctx.get(), 3072), "set RSA bits failed");
 
-    BIGNUM* e = BN_new();
-    if (!e) {
-        throw std::runtime_error("BN_new failed");
-    }
-
-    if (BN_set_word(e, RSA_F4) != 1) {
-        BN_free(e);
-        throw std::runtime_error("BN_set_word failed");
-    }
-
-    const int exp_rc = EVP_PKEY_CTX_set_rsa_keygen_pubexp(ctx.get(), e);
-    BN_free(e);
-    ensure_ok(exp_rc, "set RSA public exponent failed");
-
+    // OpenSSL uses the standard RSA public exponent 65537 by default.
+    // Avoid EVP_PKEY_CTX_set_rsa_keygen_pubexp here because it is deprecated
+    // in OpenSSL 3.x and can cause ownership/lifetime issues if handled incorrectly.
     EVP_PKEY* raw = nullptr;
     ensure_ok(EVP_PKEY_keygen(ctx.get(), &raw), "RSA keygen failed");
 
@@ -563,6 +552,7 @@ bool verify_file_detached(
 #include <chrono>
 #include <fstream>
 #include <iomanip>
+#include <sstream>
 
 namespace sigtool {
 
@@ -587,6 +577,21 @@ std::vector<uint8_t> bench_message_bytes() {
     return msg;
 }
 
+template <typename Fn>
+void run_quietly(Fn&& fn) {
+    std::ostringstream sink;
+    auto* old_buf = std::cout.rdbuf(sink.rdbuf());
+
+    try {
+        fn();
+    } catch (...) {
+        std::cout.rdbuf(old_buf);
+        throw;
+    }
+
+    std::cout.rdbuf(old_buf);
+}
+
 } // namespace
 
 void run_signature_benchmark_csv(const std::string& out_csv) {
@@ -596,10 +601,10 @@ void run_signature_benchmark_csv(const std::string& out_csv) {
         std::filesystem::create_directories(out_path.parent_path());
     }
 
-    const std::filesystem::path tmp_dir = out_path.parent_path() / "tmp_sig_bench";
+    const std::filesystem::path tmp_dir = std::filesystem::path(out_path.parent_path().string() + "/tmp_sig_bench");
     std::filesystem::create_directories(tmp_dir);
 
-    const std::filesystem::path msg_path = tmp_dir / "message_1k.bin";
+    const std::filesystem::path msg_path = std::filesystem::path(tmp_dir.string() + "/message_1k.bin");
     write_binary_file(msg_path.string(), bench_message_bytes());
 
     std::ofstream out(out_csv);
@@ -618,17 +623,19 @@ void run_signature_benchmark_csv(const std::string& out_csv) {
     std::cout << "[INFO] Signature benchmark output CSV: " << out_csv << "\n";
 
     for (const std::string& algo : algos) {
-        const std::filesystem::path pub_path = tmp_dir / (algo + "_pub.pem");
-        const std::filesystem::path priv_path = tmp_dir / (algo + "_priv.pem");
-        const std::filesystem::path sig_path = tmp_dir / (algo + ".sig");
+        const std::filesystem::path pub_path = std::filesystem::path(tmp_dir.string() + "/" + algo + "_pub.pem");
+        const std::filesystem::path priv_path = std::filesystem::path(tmp_dir.string() + "/" + algo + "_priv.pem");
+        const std::filesystem::path sig_path = std::filesystem::path(tmp_dir.string() + "/" + algo + ".sig");
 
-        const size_t keygen_iters = (algo == "rsa-pss-3072") ? 5 : 100;
+        const size_t keygen_iters = (algo == "rsa-pss-3072") ? 3 : 30;
         const double keygen_total = measure_ms_bench([&]() {
-            for (size_t i = 0; i < keygen_iters; ++i) {
-                const std::filesystem::path pub_i = tmp_dir / (algo + "_pub_" + std::to_string(i) + ".pem");
-                const std::filesystem::path priv_i = tmp_dir / (algo + "_priv_" + std::to_string(i) + ".pem");
-                generate_keypair(algo, pub_i.string(), priv_i.string());
-            }
+            run_quietly([&]() {
+                for (size_t i = 0; i < keygen_iters; ++i) {
+                    const std::filesystem::path pub_i = std::filesystem::path(tmp_dir.string() + "/" + algo + "_pub_" + std::to_string(i) + ".pem");
+                    const std::filesystem::path priv_i = std::filesystem::path(tmp_dir.string() + "/" + algo + "_priv_" + std::to_string(i) + ".pem");
+                    generate_keypair(algo, pub_i.string(), priv_i.string());
+                }
+            });
         });
 
         out << algo << ",keygen," << keygen_iters << ","
@@ -643,13 +650,17 @@ void run_signature_benchmark_csv(const std::string& out_csv) {
                   << (keygen_total / static_cast<double>(keygen_iters))
                   << "\n";
 
-        generate_keypair(algo, pub_path.string(), priv_path.string());
+        run_quietly([&]() {
+            generate_keypair(algo, pub_path.string(), priv_path.string());
+        });
 
-        const size_t sign_iters = (algo == "rsa-pss-3072") ? 100 : 1000;
+        const size_t sign_iters = (algo == "rsa-pss-3072") ? 50 : 200;
         const double sign_total = measure_ms_bench([&]() {
-            for (size_t i = 0; i < sign_iters; ++i) {
-                sign_file_detached(algo, priv_path.string(), msg_path.string(), sig_path.string());
-            }
+            run_quietly([&]() {
+                for (size_t i = 0; i < sign_iters; ++i) {
+                    sign_file_detached(algo, priv_path.string(), msg_path.string(), sig_path.string());
+                }
+            });
         });
 
         const size_t sig_size = std::filesystem::file_size(sig_path);
@@ -666,14 +677,16 @@ void run_signature_benchmark_csv(const std::string& out_csv) {
                   << ", sig_size=" << sig_size
                   << "\n";
 
-        const size_t verify_iters = (algo == "rsa-pss-3072") ? 300 : 1000;
+        const size_t verify_iters = (algo == "rsa-pss-3072") ? 100 : 200;
         const double verify_total = measure_ms_bench([&]() {
-            for (size_t i = 0; i < verify_iters; ++i) {
-                const bool ok = verify_file_detached(algo, pub_path.string(), msg_path.string(), sig_path.string());
-                if (!ok) {
-                    throw std::runtime_error("benchmark verify failed for " + algo);
+            run_quietly([&]() {
+                for (size_t i = 0; i < verify_iters; ++i) {
+                    const bool ok = verify_file_detached(algo, pub_path.string(), msg_path.string(), sig_path.string());
+                    if (!ok) {
+                        throw std::runtime_error("benchmark verify failed for " + algo);
+                    }
                 }
-            }
+            });
         });
 
         out << algo << ",verify," << verify_iters << ","
