@@ -15,7 +15,9 @@ void print_help() {
         << "  sigtool keygen --algo ecdsa-p256 --pub pub.pem --priv priv.pem\n"
         << "  sigtool keygen --algo ecdsa-p384 --pub pub.pem --priv priv.pem\n"
         << "  sigtool keygen --algo rsa-pss-3072 --pub pub.pem --priv priv.pem\n"
-        << "  sigtool keyinfo --pub pub.pem\n\n"
+        << "  sigtool keyinfo --pub pub.pem\n"
+        << "  sigtool sign --algo ecdsa-p256 --priv priv.pem --in message.bin --sig signature.sig\n"
+        << "  sigtool verify --algo ecdsa-p256 --pub pub.pem --in message.bin --sig signature.sig\n\n"
         << "Algorithms:\n"
         << "  ecdsa-p256\n"
         << "  ecdsa-p384\n"
@@ -43,6 +45,37 @@ int run_keygen(int argc, char* argv[]) {
 
     sigtool::generate_keypair(algo, pub_path, priv_path);
     return 0;
+}
+
+
+int run_sign(int argc, char* argv[]) {
+    const std::string algo = get_arg(argc, argv, "--algo");
+    const std::string priv_path = get_arg(argc, argv, "--priv");
+    const std::string input_path = get_arg(argc, argv, "--in");
+    const std::string sig_path = get_arg(argc, argv, "--sig");
+
+    if (algo.empty() || priv_path.empty() || input_path.empty() || sig_path.empty()) {
+        std::cerr << "ERROR: sign requires --algo ALGO --priv priv.pem --in message.bin --sig signature.sig\n";
+        return 1;
+    }
+
+    sigtool::sign_file_detached(algo, priv_path, input_path, sig_path);
+    return 0;
+}
+
+int run_verify(int argc, char* argv[]) {
+    const std::string algo = get_arg(argc, argv, "--algo");
+    const std::string pub_path = get_arg(argc, argv, "--pub");
+    const std::string input_path = get_arg(argc, argv, "--in");
+    const std::string sig_path = get_arg(argc, argv, "--sig");
+
+    if (algo.empty() || pub_path.empty() || input_path.empty() || sig_path.empty()) {
+        std::cerr << "ERROR: verify requires --algo ALGO --pub pub.pem --in message.bin --sig signature.sig\n";
+        return 1;
+    }
+
+    const bool ok = sigtool::verify_file_detached(algo, pub_path, input_path, sig_path);
+    return ok ? 0 : 1;
 }
 
 int run_keyinfo(int argc, char* argv[]) {
@@ -85,6 +118,14 @@ int main(int argc, char* argv[]) {
 
         if (command == "keyinfo") {
             return run_keyinfo(argc, argv);
+        }
+
+        if (command == "sign") {
+            return run_sign(argc, argv);
+        }
+
+        if (command == "verify") {
+            return run_verify(argc, argv);
         }
 
         std::cerr << "ERROR: unknown command: " << command << "\n";

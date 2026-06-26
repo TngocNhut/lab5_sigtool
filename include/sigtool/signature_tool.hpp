@@ -16,4 +16,18 @@ void print_key_info(
     const std::string& public_pem_path
 );
 
+void sign_file_detached(
+    const std::string& algo,
+    const std::string& private_pem_path,
+    const std::string& input_path,
+    const std::string& signature_path
+);
+
+bool verify_file_detached(
+    const std::string& algo,
+    const std::string& public_pem_path,
+    const std::string& input_path,
+    const std::string& signature_path
+);
+
 } // namespace sigtool

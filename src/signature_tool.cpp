@@ -308,3 +308,254 @@ void print_key_info(const std::string& public_pem_path) {
 }
 
 } // namespace sigtool
+
+#include "sigtool/file_utils.hpp"
+
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rsa.h>
+
+#include <vector>
+
+namespace sigtool {
+
+namespace {
+
+struct EvpMdCtxDeleter2 {
+    void operator()(EVP_MD_CTX* p) const {
+        EVP_MD_CTX_free(p);
+    }
+};
+
+using EvpMdCtxPtr2 = std::unique_ptr<EVP_MD_CTX, EvpMdCtxDeleter2>;
+
+struct EvpPkeyDeleter2 {
+    void operator()(EVP_PKEY* p) const {
+        EVP_PKEY_free(p);
+    }
+};
+
+using EvpPkeyPtr2 = std::unique_ptr<EVP_PKEY, EvpPkeyDeleter2>;
+
+std::string openssl_error_string2() {
+    char buf[256] = {};
+    const unsigned long err = ERR_get_error();
+
+    if (err == 0) {
+        return "unknown OpenSSL error";
+    }
+
+    ERR_error_string_n(err, buf, sizeof(buf));
+    return std::string(buf);
+}
+
+void ensure_ok2(int rc, const std::string& what) {
+    if (rc != 1) {
+        throw std::runtime_error(what + ": " + openssl_error_string2());
+    }
+}
+
+const EVP_MD* digest_for_signature_algo(const std::string& algo) {
+    if (algo == "ecdsa-p384") {
+        return EVP_sha384();
+    }
+
+    return EVP_sha256();
+}
+
+EvpPkeyPtr2 load_private_key_for_signing(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) {
+        throw std::runtime_error("cannot open private key: " + path);
+    }
+
+    EVP_PKEY* raw = PEM_read_PrivateKey(f, nullptr, nullptr, nullptr);
+    fclose(f);
+
+    if (!raw) {
+        throw std::runtime_error("cannot parse private key PEM: " + path);
+    }
+
+    return EvpPkeyPtr2(raw);
+}
+
+EvpPkeyPtr2 load_public_key_for_verifying(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) {
+        throw std::runtime_error("cannot open public key: " + path);
+    }
+
+    EVP_PKEY* raw = PEM_read_PUBKEY(f, nullptr, nullptr, nullptr);
+    fclose(f);
+
+    if (!raw) {
+        throw std::runtime_error("cannot parse public key PEM: " + path);
+    }
+
+    return EvpPkeyPtr2(raw);
+}
+
+void configure_rsa_pss_if_needed(EVP_PKEY_CTX* pctx, const std::string& algo) {
+    if (algo != "rsa-pss-3072") {
+        return;
+    }
+
+    ensure_ok2(EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING),
+               "set RSA-PSS padding failed");
+
+    ensure_ok2(EVP_PKEY_CTX_set_rsa_mgf1_md(pctx, EVP_sha256()),
+               "set RSA-PSS MGF1 SHA-256 failed");
+
+    ensure_ok2(EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, 32),
+               "set RSA-PSS salt length failed");
+}
+
+std::string digest_name_for_algo(const std::string& algo) {
+    if (algo == "ecdsa-p384") {
+        return "SHA-384";
+    }
+
+    return "SHA-256";
+}
+
+} // namespace
+
+void sign_file_detached(
+    const std::string& algo,
+    const std::string& private_pem_path,
+    const std::string& input_path,
+    const std::string& signature_path
+) {
+    if (!is_supported_algo(algo)) {
+        throw std::runtime_error("unsupported algorithm: " + algo);
+    }
+
+    const std::vector<uint8_t> message = read_binary_file(input_path);
+    EvpPkeyPtr2 key = load_private_key_for_signing(private_pem_path);
+
+    EvpMdCtxPtr2 mdctx(EVP_MD_CTX_new());
+    if (!mdctx) {
+        throw std::runtime_error("EVP_MD_CTX_new failed");
+    }
+
+    EVP_PKEY_CTX* pctx = nullptr;
+
+    ensure_ok2(
+        EVP_DigestSignInit(
+            mdctx.get(),
+            &pctx,
+            digest_for_signature_algo(algo),
+            nullptr,
+            key.get()
+        ),
+        "EVP_DigestSignInit failed"
+    );
+
+    configure_rsa_pss_if_needed(pctx, algo);
+
+    ensure_ok2(
+        EVP_DigestSignUpdate(mdctx.get(), message.data(), message.size()),
+        "EVP_DigestSignUpdate failed"
+    );
+
+    size_t sig_len = 0;
+
+    ensure_ok2(
+        EVP_DigestSignFinal(mdctx.get(), nullptr, &sig_len),
+        "EVP_DigestSignFinal length query failed"
+    );
+
+    std::vector<uint8_t> signature(sig_len);
+
+    ensure_ok2(
+        EVP_DigestSignFinal(mdctx.get(), signature.data(), &sig_len),
+        "EVP_DigestSignFinal failed"
+    );
+
+    signature.resize(sig_len);
+    write_binary_file(signature_path, signature);
+
+    std::cout << "[OK] Detached signature created\n";
+    std::cout << "[OK] Algorithm: " << algo << "\n";
+    std::cout << "[OK] Digest: " << digest_name_for_algo(algo) << "\n";
+    std::cout << "[OK] Input file: " << input_path << "\n";
+    std::cout << "[OK] Input size: " << message.size() << " bytes\n";
+    std::cout << "[OK] Private key: " << private_pem_path << "\n";
+    std::cout << "[OK] Signature file: " << signature_path << "\n";
+    std::cout << "[OK] Signature size: " << signature.size() << " bytes\n";
+
+    if (algo == "rsa-pss-3072") {
+        std::cout << "[INFO] RSA-PSS salt length: 32 bytes\n";
+        std::cout << "[INFO] RSA-PSS MGF1: SHA-256\n";
+    }
+}
+
+bool verify_file_detached(
+    const std::string& algo,
+    const std::string& public_pem_path,
+    const std::string& input_path,
+    const std::string& signature_path
+) {
+    if (!is_supported_algo(algo)) {
+        throw std::runtime_error("unsupported algorithm: " + algo);
+    }
+
+    const std::vector<uint8_t> message = read_binary_file(input_path);
+    const std::vector<uint8_t> signature = read_binary_file(signature_path);
+    EvpPkeyPtr2 key = load_public_key_for_verifying(public_pem_path);
+
+    EvpMdCtxPtr2 mdctx(EVP_MD_CTX_new());
+    if (!mdctx) {
+        throw std::runtime_error("EVP_MD_CTX_new failed");
+    }
+
+    EVP_PKEY_CTX* pctx = nullptr;
+
+    ensure_ok2(
+        EVP_DigestVerifyInit(
+            mdctx.get(),
+            &pctx,
+            digest_for_signature_algo(algo),
+            nullptr,
+            key.get()
+        ),
+        "EVP_DigestVerifyInit failed"
+    );
+
+    configure_rsa_pss_if_needed(pctx, algo);
+
+    ensure_ok2(
+        EVP_DigestVerifyUpdate(mdctx.get(), message.data(), message.size()),
+        "EVP_DigestVerifyUpdate failed"
+    );
+
+    const int rc = EVP_DigestVerifyFinal(
+        mdctx.get(),
+        signature.data(),
+        signature.size()
+    );
+
+    if (rc == 1) {
+        std::cout << "[OK] Signature verification succeeded\n";
+        std::cout << "[OK] Algorithm: " << algo << "\n";
+        std::cout << "[OK] Digest: " << digest_name_for_algo(algo) << "\n";
+        std::cout << "[OK] Input file: " << input_path << "\n";
+        std::cout << "[OK] Public key: " << public_pem_path << "\n";
+        std::cout << "[OK] Signature file: " << signature_path << "\n";
+        std::cout << "[OK] Signature size: " << signature.size() << " bytes\n";
+        return true;
+    }
+
+    if (rc == 0) {
+        std::cout << "[FAIL] Signature verification failed\n";
+        std::cout << "[INFO] Algorithm: " << algo << "\n";
+        std::cout << "[INFO] Input file: " << input_path << "\n";
+        std::cout << "[INFO] Public key: " << public_pem_path << "\n";
+        std::cout << "[INFO] Signature file: " << signature_path << "\n";
+        return false;
+    }
+
+    throw std::runtime_error("EVP_DigestVerifyFinal error: " + openssl_error_string2());
+}
+
+} // namespace sigtool
