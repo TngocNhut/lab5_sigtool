@@ -17,7 +17,8 @@ void print_help() {
         << "  sigtool keygen --algo rsa-pss-3072 --pub pub.pem --priv priv.pem\n"
         << "  sigtool keyinfo --pub pub.pem\n"
         << "  sigtool sign --algo ecdsa-p256 --priv priv.pem --in message.bin --sig signature.sig\n"
-        << "  sigtool verify --algo ecdsa-p256 --pub pub.pem --in message.bin --sig signature.sig\n\n"
+        << "  sigtool verify --algo ecdsa-p256 --pub pub.pem --in message.bin --sig signature.sig\n"
+        << "  sigtool bench --out artifacts/windows/benchmark/bench_signatures_windows.csv\n\n"
         << "Algorithms:\n"
         << "  ecdsa-p256\n"
         << "  ecdsa-p384\n"
@@ -47,6 +48,19 @@ int run_keygen(int argc, char* argv[]) {
     return 0;
 }
 
+
+
+int run_bench(int argc, char* argv[]) {
+    const std::string out_path = get_arg(argc, argv, "--out");
+
+    if (out_path.empty()) {
+        std::cerr << "ERROR: bench requires --out benchmark.csv\n";
+        return 1;
+    }
+
+    sigtool::run_signature_benchmark_csv(out_path);
+    return 0;
+}
 
 int run_sign(int argc, char* argv[]) {
     const std::string algo = get_arg(argc, argv, "--algo");
@@ -126,6 +140,10 @@ int main(int argc, char* argv[]) {
 
         if (command == "verify") {
             return run_verify(argc, argv);
+        }
+
+        if (command == "bench") {
+            return run_bench(argc, argv);
         }
 
         std::cerr << "ERROR: unknown command: " << command << "\n";

@@ -30,4 +30,8 @@ bool verify_file_detached(
     const std::string& signature_path
 );
 
+void run_signature_benchmark_csv(
+    const std::string& out_csv
+);
+
 } // namespace sigtool

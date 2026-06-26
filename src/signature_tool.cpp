@@ -559,3 +559,136 @@ bool verify_file_detached(
 }
 
 } // namespace sigtool
+
+#include <chrono>
+#include <fstream>
+#include <iomanip>
+
+namespace sigtool {
+
+namespace {
+
+template <typename Fn>
+double measure_ms_bench(Fn&& fn) {
+    const auto start = std::chrono::steady_clock::now();
+    fn();
+    const auto end = std::chrono::steady_clock::now();
+
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+std::vector<uint8_t> bench_message_bytes() {
+    std::vector<uint8_t> msg(1024);
+
+    for (size_t i = 0; i < msg.size(); ++i) {
+        msg[i] = static_cast<uint8_t>(i & 0xff);
+    }
+
+    return msg;
+}
+
+} // namespace
+
+void run_signature_benchmark_csv(const std::string& out_csv) {
+    const std::filesystem::path out_path(out_csv);
+
+    if (!out_path.parent_path().empty()) {
+        std::filesystem::create_directories(out_path.parent_path());
+    }
+
+    const std::filesystem::path tmp_dir = out_path.parent_path() / "tmp_sig_bench";
+    std::filesystem::create_directories(tmp_dir);
+
+    const std::filesystem::path msg_path = tmp_dir / "message_1k.bin";
+    write_binary_file(msg_path.string(), bench_message_bytes());
+
+    std::ofstream out(out_csv);
+    if (!out) {
+        throw std::runtime_error("cannot open benchmark CSV: " + out_csv);
+    }
+
+    out << "algorithm,operation,iterations,total_ms,avg_ms,ops_per_sec,signature_size_bytes\n";
+
+    const std::vector<std::string> algos = {
+        "ecdsa-p256",
+        "ecdsa-p384",
+        "rsa-pss-3072"
+    };
+
+    std::cout << "[INFO] Signature benchmark output CSV: " << out_csv << "\n";
+
+    for (const std::string& algo : algos) {
+        const std::filesystem::path pub_path = tmp_dir / (algo + "_pub.pem");
+        const std::filesystem::path priv_path = tmp_dir / (algo + "_priv.pem");
+        const std::filesystem::path sig_path = tmp_dir / (algo + ".sig");
+
+        const size_t keygen_iters = (algo == "rsa-pss-3072") ? 5 : 100;
+        const double keygen_total = measure_ms_bench([&]() {
+            for (size_t i = 0; i < keygen_iters; ++i) {
+                const std::filesystem::path pub_i = tmp_dir / (algo + "_pub_" + std::to_string(i) + ".pem");
+                const std::filesystem::path priv_i = tmp_dir / (algo + "_priv_" + std::to_string(i) + ".pem");
+                generate_keypair(algo, pub_i.string(), priv_i.string());
+            }
+        });
+
+        out << algo << ",keygen," << keygen_iters << ","
+            << std::fixed << std::setprecision(6)
+            << keygen_total << ","
+            << (keygen_total / static_cast<double>(keygen_iters)) << ","
+            << (1000.0 * static_cast<double>(keygen_iters) / keygen_total) << ","
+            << 0 << "\n";
+
+        std::cout << "[OK] " << algo
+                  << " keygen avg_ms="
+                  << (keygen_total / static_cast<double>(keygen_iters))
+                  << "\n";
+
+        generate_keypair(algo, pub_path.string(), priv_path.string());
+
+        const size_t sign_iters = (algo == "rsa-pss-3072") ? 100 : 1000;
+        const double sign_total = measure_ms_bench([&]() {
+            for (size_t i = 0; i < sign_iters; ++i) {
+                sign_file_detached(algo, priv_path.string(), msg_path.string(), sig_path.string());
+            }
+        });
+
+        const size_t sig_size = std::filesystem::file_size(sig_path);
+
+        out << algo << ",sign," << sign_iters << ","
+            << sign_total << ","
+            << (sign_total / static_cast<double>(sign_iters)) << ","
+            << (1000.0 * static_cast<double>(sign_iters) / sign_total) << ","
+            << sig_size << "\n";
+
+        std::cout << "[OK] " << algo
+                  << " sign avg_ms="
+                  << (sign_total / static_cast<double>(sign_iters))
+                  << ", sig_size=" << sig_size
+                  << "\n";
+
+        const size_t verify_iters = (algo == "rsa-pss-3072") ? 300 : 1000;
+        const double verify_total = measure_ms_bench([&]() {
+            for (size_t i = 0; i < verify_iters; ++i) {
+                const bool ok = verify_file_detached(algo, pub_path.string(), msg_path.string(), sig_path.string());
+                if (!ok) {
+                    throw std::runtime_error("benchmark verify failed for " + algo);
+                }
+            }
+        });
+
+        out << algo << ",verify," << verify_iters << ","
+            << verify_total << ","
+            << (verify_total / static_cast<double>(verify_iters)) << ","
+            << (1000.0 * static_cast<double>(verify_iters) / verify_total) << ","
+            << sig_size << "\n";
+
+        std::cout << "[OK] " << algo
+                  << " verify avg_ms="
+                  << (verify_total / static_cast<double>(verify_iters))
+                  << "\n";
+    }
+
+    std::cout << "[OK] Signature benchmark completed\n";
+}
+
+} // namespace sigtool
