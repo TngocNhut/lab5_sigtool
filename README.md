@@ -1,19 +1,14 @@
 
 # Lab 5 - Classical Digital Signatures
 
+Họ tên: Trần Ngọc Nhất
+MSSV: 24162086
 
 
-Student: Tran Ngoc Nhat
 
-
-
-## Scope
-
-
+## Goals
 
 This project implements a CLI signature tool for Lab 5:
-
-
 
 - ECDSA-P256 key generation
 
